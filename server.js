@@ -1,13 +1,8 @@
 import Fastify from 'fastify';
-import { Browserbase } from '@browserbasehq/sdk';
+import axios from 'axios';
 import * as cheerio from 'cheerio';
 
 const fastify = Fastify({ logger: true });
-
-// Initialize Browserbase
-const bb = new Browserbase({
-  apiKey: process.env.bb_live_Z8KE-bGrA4AaQL0hWF6jh5h7njk,
-});
 
 fastify.get('/health', async (request, reply) => {
   return { status: 'ok', timestamp: new Date().toISOString() };
@@ -20,86 +15,141 @@ fastify.post('/scrape-latest-travel-news', async (request, reply) => {
   const sources = [
     {
       name: "Travel + Leisure",
-      url: "https://www.travelandleisure.com/",
-      selectors: ['article h2 a', 'h2 a', 'h3 a', '.card-title a']
+      url: "https://www.travelandleisure.com/"
     },
     {
       name: "BBC Travel",
-      url: "https://www.bbc.com/travel",
-      selectors: ['article h2 a', 'h3 a', '.media__title a']
+      url: "https://www.bbc.com/travel"
     },
     {
       name: "AFAR Magazine",
-      url: "https://www.afar.com/",
-      selectors: ['h2 a', 'h3 a', '[class*="title"] a']
+      url: "https://www.afar.com/"
     }
   ];
 
   for (const source of sources) {
     try {
-      // Create a new browser session
-      const session = await bb.sessions.create({
-        projectId: process.env.45e4602f-ce33-41a1-ad53-94435f24176e, // We'll set this up
+      // Create Browserbase session
+      const sessionResponse = await axios.post('https://api.browserbase.com/v1/sessions', {
+        projectId: process.env.BROWSERBASE_PROJECT_ID
+      }, {
+        headers: {
+          'X-BB-API-Key': process.env.BROWSERBASE_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        timeout: 15000
       });
 
-      // Navigate to the page
-      const page = await bb.pages.create(session.id);
-      await bb.pages.goto(page.id, { url: source.url });
-      
-      // Wait for content to load
-      await bb.pages.waitFor(page.id, { timeout: 5000 });
-      
-      // Get the HTML content
-      const html = await bb.pages.getHTML(page.id);
-      
-      // Clean up
-      await bb.sessions.end(session.id);
+      const sessionId = sessionResponse.data.id;
+      console.log(`Created session ${sessionId} for ${source.name}`);
 
-      // Parse with Cheerio (same as before)
+      // Navigate to page
+      await axios.post(`https://api.browserbase.com/v1/sessions/${sessionId}/actions`, {
+        action: 'goto',
+        url: source.url
+      }, {
+        headers: {
+          'X-BB-API-Key': process.env.BROWSERBASE_API_KEY,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      // Wait for page to load
+      await new Promise(resolve => setTimeout(resolve, 4000));
+
+      // Get page content
+      const contentResponse = await axios.post(`https://api.browserbase.com/v1/sessions/${sessionId}/actions`, {
+        action: 'content'
+      }, {
+        headers: {
+          'X-BB-API-Key': process.env.BROWSERBASE_API_KEY,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const html = contentResponse.data.content;
+
+      // End session
+      await axios.delete(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+        headers: {
+          'X-BB-API-Key': process.env.BROWSERBASE_API_KEY
+        }
+      });
+
+      // Parse with Cheerio
       const $ = cheerio.load(html);
       const articles = [];
 
-      for (const selector of source.selectors) {
+      // Debug: count elements
+      const debugInfo = {
+        total_links: $('a').length,
+        h2_links: $('h2 a').length,
+        h3_links: $('h3 a').length,
+        articles: $('article').length
+      };
+
+      console.log(`${source.name} debug:`, debugInfo);
+
+      // Try multiple selectors
+      const selectors = ['h2 a', 'h3 a', 'article h2 a', 'article h3 a', '.title a', '.headline a'];
+
+      for (const selector of selectors) {
         $(selector).each((i, elem) => {
-          if (articles.length >= 10) return false;
+          if (articles.length >= 8) return false;
 
           const $elem = $(elem);
           const title = $elem.text().trim();
           let link = $elem.attr('href');
 
-          if (title && link && title.length > 15 && title.length < 200) {
+          if (title && link && title.length > 15 && title.length < 250) {
+            // Fix relative URLs
             if (link.startsWith('/')) {
               link = new URL(link, source.url).href;
             }
 
-            // Filter for travel content
-            const travelKeywords = ['travel', 'destination', 'hotel', 'trip', 'vacation', 'visit', 'guide', 'best', 'new'];
+            // Travel content filtering
+            const travelKeywords = ['travel', 'destination', 'hotel', 'trip', 'vacation', 'visit', 'guide', 'best', 'places', 'where', 'tips'];
             const isTravel = travelKeywords.some(keyword =>
               title.toLowerCase().includes(keyword) || link.toLowerCase().includes(keyword)
             );
 
-            if (isTravel && link.startsWith('http')) {
+            // Avoid navigation
+            const isNav = ['home', 'about', 'contact', 'search', 'menu', 'newsletter', 'subscribe', 'sign in'].some(nav =>
+              title.toLowerCase().includes(nav)
+            );
+
+            if (link.startsWith('http') && !isNav && (isTravel || articles.length < 3)) {
               articles.push({
                 title: title,
                 url: link,
                 source: source.name,
+                selector_used: selector,
                 scraped_at: new Date().toISOString()
               });
             }
           }
         });
-        
-        if (articles.length > 0) break; // Found articles with this selector
+
+        if (articles.length >= 3) break;
       }
+
+      // Remove duplicates
+      const uniqueArticles = articles.filter((article, index, self) =>
+        index === self.findIndex(a => a.title === article.title)
+      );
 
       results.push({
         source: source.name,
-        articles: articles.slice(0, 8),
-        total_found: articles.length,
-        success: true
+        articles: uniqueArticles.slice(0, 6),
+        total_found: uniqueArticles.length,
+        debug_info: debugInfo,
+        success: true,
+        method: 'browserbase'
       });
 
     } catch (error) {
+      console.error(`Error scraping ${source.name}:`, error.message);
+      
       results.push({
         source: source.name,
         error: error.message,
