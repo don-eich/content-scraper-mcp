@@ -9,70 +9,96 @@ fastify.get('/health', async (request, reply) => {
 });
 
 fastify.post('/scrape-latest-travel-news', async (request, reply) => {
-  const { max_articles = 20 } = request.body || {};
+  const { max_articles = 25 } = request.body || {};
   const results = [];
 
+  // ALL 9 WEBSITES YOU REQUESTED
   const sources = [
     {
       name: "Travel + Leisure",
       url: "https://www.travelandleisure.com/"
     },
     {
+      name: "Condé Nast Traveler", 
+      url: "https://www.cntraveler.com/"
+    },
+    {
+      name: "AFAR",
+      url: "https://www.afar.com/"
+    },
+    {
+      name: "Wallpaper Travel",
+      url: "https://www.wallpaper.com/travel"
+    },
+    {
       name: "BBC Travel",
       url: "https://www.bbc.com/travel"
     },
     {
-      name: "AFAR Magazine",
-      url: "https://www.afar.com/"
+      name: "NY Times Travel",
+      url: "https://www.nytimes.com/section/travel"
+    },
+    {
+      name: "Budget Travel",
+      url: "https://www.budgettravel.com/"
+    },
+    {
+      name: "CNN Travel",
+      url: "https://www.cnn.com/travel"
+    },
+    {
+      name: "National Geographic Travel",
+      url: "https://www.nationalgeographic.com/travel"
     }
   ];
 
   for (const source of sources) {
     try {
-      // Create Browserbase session
+      // CORRECT Browserbase API format
       const sessionResponse = await axios.post('https://api.browserbase.com/v1/sessions', {
         projectId: process.env.BROWSERBASE_PROJECT_ID
       }, {
         headers: {
-          'X-BB-API-Key': process.env.BROWSERBASE_API_KEY,
+          'x-bb-api-key': process.env.BROWSERBASE_API_KEY, // Correct header format
           'Content-Type': 'application/json'
         },
-        timeout: 15000
+        timeout: 20000
       });
 
       const sessionId = sessionResponse.data.id;
       console.log(`Created session ${sessionId} for ${source.name}`);
 
-      // Navigate to page
-      await axios.post(`https://api.browserbase.com/v1/sessions/${sessionId}/actions`, {
-        action: 'goto',
-        url: source.url
-      }, {
+      // Use Connect API to navigate
+      const connectResponse = await axios.get(`https://api.browserbase.com/v1/sessions/${sessionId}/connect`, {
         headers: {
-          'X-BB-API-Key': process.env.BROWSERBASE_API_KEY,
-          'Content-Type': 'application/json'
+          'x-bb-api-key': process.env.BROWSERBASE_API_KEY
         }
       });
 
-      // Wait for page to load
-      await new Promise(resolve => setTimeout(resolve, 4000));
+      const { connectUrl } = connectResponse.data;
+
+      // Navigate using Playwright-like commands
+      await axios.post(`${connectUrl}/page/goto`, {
+        url: source.url,
+        options: { waitUntil: 'networkidle' }
+      }, {
+        timeout: 15000
+      });
+
+      // Wait for content to load
+      await new Promise(resolve => setTimeout(resolve, 3000));
 
       // Get page content
-      const contentResponse = await axios.post(`https://api.browserbase.com/v1/sessions/${sessionId}/actions`, {
-        action: 'content'
-      }, {
-        headers: {
-          'X-BB-API-Key': process.env.BROWSERBASE_API_KEY,
-          'Content-Type': 'application/json'
-        }
+      const contentResponse = await axios.get(`${connectUrl}/page/content`, {
+        timeout: 10000
       });
 
       const html = contentResponse.data.content;
 
-      // End session
+      // Clean up session
       await axios.delete(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
         headers: {
-          'X-BB-API-Key': process.env.BROWSERBASE_API_KEY
+          'x-bb-api-key': process.env.BROWSERBASE_API_KEY
         }
       });
 
@@ -80,69 +106,70 @@ fastify.post('/scrape-latest-travel-news', async (request, reply) => {
       const $ = cheerio.load(html);
       const articles = [];
 
-      // Debug: count elements
-      const debugInfo = {
-        total_links: $('a').length,
-        h2_links: $('h2 a').length,
-        h3_links: $('h3 a').length,
-        articles: $('article').length
-      };
-
-      console.log(`${source.name} debug:`, debugInfo);
-
-      // Try multiple selectors
-      const selectors = ['h2 a', 'h3 a', 'article h2 a', 'article h3 a', '.title a', '.headline a'];
+      // Multiple selectors for different site structures
+      const selectors = [
+        'h2 a', 'h3 a', 'h4 a',
+        'article h2 a', 'article h3 a',
+        '.title a', '.headline a', '.hed a',
+        '.card-title a', '.story-title a',
+        '[class*="title"] a', '[class*="headline"] a'
+      ];
 
       for (const selector of selectors) {
         $(selector).each((i, elem) => {
-          if (articles.length >= 8) return false;
+          if (articles.length >= 5) return false; // Limit per selector
 
           const $elem = $(elem);
           const title = $elem.text().trim();
           let link = $elem.attr('href');
 
-          if (title && link && title.length > 15 && title.length < 250) {
+          if (title && link && title.length > 10 && title.length < 300) {
             // Fix relative URLs
             if (link.startsWith('/')) {
               link = new URL(link, source.url).href;
             }
 
             // Travel content filtering
-            const travelKeywords = ['travel', 'destination', 'hotel', 'trip', 'vacation', 'visit', 'guide', 'best', 'places', 'where', 'tips'];
+            const travelKeywords = [
+              'travel', 'destination', 'hotel', 'trip', 'vacation', 'visit', 
+              'guide', 'best', 'places', 'where', 'tips', 'journey', 'explore',
+              'adventure', 'getaway', 'tourism', 'discover', 'experience'
+            ];
+
             const isTravel = travelKeywords.some(keyword =>
-              title.toLowerCase().includes(keyword) || link.toLowerCase().includes(keyword)
+              title.toLowerCase().includes(keyword) || 
+              link.toLowerCase().includes(keyword)
             );
 
-            // Avoid navigation
-            const isNav = ['home', 'about', 'contact', 'search', 'menu', 'newsletter', 'subscribe', 'sign in'].some(nav =>
-              title.toLowerCase().includes(nav)
-            );
+            // Avoid navigation/menu items
+            const isNav = [
+              'home', 'about', 'contact', 'search', 'menu', 'newsletter', 
+              'subscribe', 'sign in', 'log in', 'account', 'shop'
+            ].some(nav => title.toLowerCase().includes(nav));
 
-            if (link.startsWith('http') && !isNav && (isTravel || articles.length < 3)) {
+            if (link.startsWith('http') && !isNav && (isTravel || articles.length < 2)) {
               articles.push({
                 title: title,
                 url: link,
                 source: source.name,
-                selector_used: selector,
                 scraped_at: new Date().toISOString()
               });
             }
           }
         });
 
-        if (articles.length >= 3) break;
+        if (articles.length >= 3) break; // Found enough articles
       }
 
       // Remove duplicates
       const uniqueArticles = articles.filter((article, index, self) =>
-        index === self.findIndex(a => a.title === article.title)
+        index === self.findIndex(a => a.title.toLowerCase() === article.title.toLowerCase())
       );
 
       results.push({
         source: source.name,
-        articles: uniqueArticles.slice(0, 6),
+        articles: uniqueArticles.slice(0, 4), // Top 4 per source
         total_found: uniqueArticles.length,
-        debug_info: debugInfo,
         success: true,
         method: 'browserbase'
       });
@@ -152,11 +179,14 @@ fastify.post('/scrape-latest-travel-news', async (request, reply) => {
       
       results.push({
         source: source.name,
-        error: error.message,
+        error: error.message.substring(0, 100), // Truncate long errors
         success: false,
         articles: []
       });
     }
+
+    // Small delay between requests to avoid rate limiting
+    await new Promise(resolve => setTimeout(resolve, 1000));
   }
 
   const allArticles = results
@@ -172,7 +202,12 @@ fastify.post('/scrape-latest-travel-news', async (request, reply) => {
       successful_sources: results.filter(r => r.success).length,
       scan_timestamp: new Date().toISOString()
     },
-    source_breakdown: results
+    source_breakdown: results.map(r => ({
+      source: r.source,
+      articles_found: r.articles?.length || 0,
+      success: r.success,
+      error: r.error || null
+    }))
   };
 });
 
@@ -180,7 +215,7 @@ const start = async () => {
   try {
     const port = process.env.PORT || 3000;
     await fastify.listen({ port, host: '0.0.0.0' });
-    console.log(`Browserbase Travel Scraper running on port ${port}`);
+    console.log(`All 9 Travel Sites Scraper running on port ${port}`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
