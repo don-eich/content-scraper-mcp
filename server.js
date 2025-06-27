@@ -5,11 +5,11 @@ import pg from 'pg';
 
 const fastify = Fastify({ logger: true });
 
-// Database connection
+// Database connection (updated)
 const { Pool } = pg;
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  connectionString: process.env.DATABASE_URL,
+  ssl: false // Railway internal connections don't need SSL
 });
 
 // Auto-create table on startup
