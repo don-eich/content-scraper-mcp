@@ -6,7 +6,7 @@ const fastify = Fastify({ logger: true });
 
 // Initialize Browserbase
 const bb = new Browserbase({
-  apiKey: process.env.BROWSERBASE_API_KEY,
+  apiKey: process.env.bb_live_Z8KE-bGrA4AaQL0hWF6jh5h7njk,
 });
 
 fastify.get('/health', async (request, reply) => {
@@ -39,7 +39,7 @@ fastify.post('/scrape-latest-travel-news', async (request, reply) => {
     try {
       // Create a new browser session
       const session = await bb.sessions.create({
-        projectId: process.env.BROWSERBASE_PROJECT_ID, // We'll set this up
+        projectId: process.env.45e4602f-ce33-41a1-ad53-94435f24176e, // We'll set this up
       });
 
       // Navigate to the page
