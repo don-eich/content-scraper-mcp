@@ -12,6 +12,42 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
+// Auto-create table on startup
+async function initDatabase() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_sources (
+        id SERIAL PRIMARY KEY,
+        user_id VARCHAR(255) NOT NULL,
+        website_name VARCHAR(255) NOT NULL,
+        website_url TEXT NOT NULL,
+        selectors JSON NOT NULL,
+        active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    
+    console.log('Database table ready');
+    
+    // Insert default sources if table is empty
+    const count = await pool.query('SELECT COUNT(*) FROM user_sources');
+    if (parseInt(count.rows[0].count) === 0) {
+      await pool.query(`
+        INSERT INTO user_sources (user_id, website_name, website_url, selectors) VALUES
+        ('default', 'Travel + Leisure', 'https://www.travelandleisure.com/', '["article h2 a", "h2 a", ".card-title a"]'),
+        ('default', 'AFAR', 'https://www.afar.com/', '["h2 a", "[class*=\\"title\\"] a", ".title a"]'),
+        ('default', 'National Geographic Travel', 'https://www.nationalgeographic.com/travel', '["h2 a", "h3 a", ".card-title a"]'),
+        ('default', 'BBC Travel', 'https://www.bbc.com/travel', '["article h2 a", "h3 a", ".media__title a"]'),
+        ('default', 'NY Times Travel', 'https://www.nytimes.com/section/travel', '["h2 a", "h3 a", ".story-wrapper h2 a"]')
+      `);
+      console.log('Default sources inserted');
+    }
+    
+  } catch (error) {
+    console.error('Database initialization failed:', error.message);
+  }
+}
+
 // Health check
 fastify.get('/health', async () => ({ status: 'ok' }));
 
