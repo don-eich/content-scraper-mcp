@@ -289,126 +289,172 @@ const start = async () => {
 
 start();
 
-// Add this new endpoint after your existing ones
 fastify.post('/api/extract-full-content', async (request, reply) => {
   const { url, article_id } = request.body;
   
   try {
     let fullContent = '';
+    let title = '';
+    let excerpt = '';
     let extractionMethod = 'http';
     
-    // Try Browserbase for better content extraction
-    if (process.env.BROWSERBASE_API_KEY) {
-      try {
-        const sessionResponse = await axios.post('https://api.browserbase.com/v1/sessions', {
-          projectId: process.env.BROWSERBASE_PROJECT_ID
-        }, {
-          headers: {
-            'x-bb-api-key': process.env.BROWSERBASE_API_KEY,
-            'Content-Type': 'application/json'
-          },
-          timeout: 15000
-        });
-
-        const sessionId = sessionResponse.data.id;
-        
-        await axios.post(`https://api.browserbase.com/v1/sessions/${sessionId}/goto`, {
-          url: url
-        }, {
-          headers: {
-            'x-bb-api-key': process.env.BROWSERBASE_API_KEY
-          }
-        });
-
-        // Wait for content to load
-        await new Promise(resolve => setTimeout(resolve, 3000));
-
-        const contentResponse = await axios.get(`https://api.browserbase.com/v1/sessions/${sessionId}/content`, {
-          headers: {
-            'x-bb-api-key': process.env.BROWSERBASE_API_KEY
-          }
-        });
-
-        const html = contentResponse.data;
-        await axios.delete(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
-          headers: {
-            'x-bb-api-key': process.env.BROWSERBASE_API_KEY
-          }
-        });
-
-        // Extract article content from HTML
-        const $ = cheerio.load(html);
-        
-        // Remove unwanted elements
-        $('script, style, nav, header, footer, .ad, .advertisement, .social-share, .comments').remove();
-        
-        // Try multiple selectors for article content
-        const contentSelectors = [
-          'article',
-          '.article-content',
-          '.story-body',
-          '.entry-content',
-          '[class*="content"]',
-          '.post-content',
-          'main'
+    // Fetch the webpage
+    const response = await axios.get(url, {
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9'
+      }
+    });
+    
+    const $ = cheerio.load(response.data);
+    
+    // Remove unwanted elements completely
+    $(`.ad, .advertisement, .ads, .sidebar, .nav, .navigation, .menu, .header, .footer, 
+       .comments, .comment, .social, .share, .newsletter, .subscription, .popup, .modal,
+       .related, .recommended, .trending, .popular, script, style, noscript, iframe,
+       .breadcrumb, .tag, .category, .author-bio, .author-info, .meta, .byline,
+       [class*="ad-"], [class*="advertisement"], [id*="ad-"], [id*="advertisement"],
+       .cookie, .gdpr, .consent, .alert, .notification, .banner`).remove();
+    
+    // Extract title from multiple sources
+    title = $('h1').first().text().trim() || 
+            $('title').text().trim() || 
+            $('[property="og:title"]').attr('content') || 
+            $('meta[name="title"]').attr('content') || '';
+    
+    // Clean title
+    title = title.replace(/\s+/g, ' ').replace(/[\|\-–—].+$/, '').trim();
+    
+    // Smart content extraction - try multiple strategies
+    const contentExtractionStrategies = [
+      // Strategy 1: Semantic article tags
+      () => {
+        const article = $('article');
+        if (article.length > 0) {
+          return article.first().text().trim();
+        }
+        return '';
+      },
+      
+      // Strategy 2: Common CMS patterns
+      () => {
+        const selectors = [
+          '.article-content', '.story-content', '.entry-content', '.post-content',
+          '.article-body', '.story-body', '.entry-body', '.post-body',
+          '.content-area', '.main-content', '.primary-content',
+          '[class*="article"]', '[class*="story"]', '[class*="content"]'
         ];
         
-        for (const selector of contentSelectors) {
+        for (const selector of selectors) {
           const content = $(selector).text().trim();
-          if (content.length > fullContent.length && content.length > 500) {
-            fullContent = content;
+          if (content.length > 500) {
+            return content;
           }
         }
+        return '';
+      },
+      
+      // Strategy 3: Largest paragraph-rich container
+      () => {
+        let bestContent = '';
+        let bestScore = 0;
         
-        extractionMethod = 'browserbase';
+        $('div, section, main').each((i, elem) => {
+          const $elem = $(elem);
+          const text = $elem.text();
+          const paragraphCount = $elem.find('p').length;
+          const textLength = text.length;
+          
+          // Score based on text length and paragraph count
+          const score = textLength + (paragraphCount * 100);
+          
+          if (score > bestScore && textLength > 200 && paragraphCount > 2) {
+            bestScore = score;
+            bestContent = text.trim();
+          }
+        });
         
-      } catch (browserbaseError) {
-        console.log(`Browserbase failed for ${url}, trying HTTP fallback`);
+        return bestContent;
+      },
+      
+      // Strategy 4: Paragraph-based extraction
+      () => {
+        const paragraphs = $('p').map((i, p) => $(p).text().trim()).get();
+        const meaningfulParas = paragraphs.filter(p => p.length > 50);
+        
+        if (meaningfulParas.length > 3) {
+          return meaningfulParas.join('\n\n');
+        }
+        return '';
+      },
+      
+      // Strategy 5: Main tag fallback
+      () => {
+        const main = $('main');
+        if (main.length > 0) {
+          return main.first().text().trim();
+        }
+        return '';
+      }
+    ];
+    
+    // Try each strategy until we get good content
+    for (const strategy of contentExtractionStrategies) {
+      const content = strategy();
+      if (content.length > fullContent.length && content.length > 300) {
+        fullContent = content;
       }
     }
     
-    // HTTP fallback if Browserbase failed or not available
-    if (!fullContent || fullContent.length < 200) {
-      const response = await axios.get(url, {
-        timeout: 10000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-      });
-      
-      const $ = cheerio.load(response.data);
-      $('script, style, nav, header, footer, .ad, .advertisement').remove();
-      
-      const contentSelectors = ['article', '.article-content', '.story-body', 'main'];
-      for (const selector of contentSelectors) {
-        const content = $(selector).text().trim();
-        if (content.length > fullContent.length) {
-          fullContent = content;
-        }
-      }
-      
-      extractionMethod = 'http';
+    // If still no good content, try body but filter out navigation
+    if (fullContent.length < 300) {
+      $('nav, .nav, .navigation, .menu, header, footer').remove();
+      fullContent = $('body').text().trim();
     }
     
-    // Clean and process the content
-    const cleanContent = fullContent
-      .replace(/\s+/g, ' ')
-      .replace(/\n+/g, '\n')
+    // Clean the extracted content
+    fullContent = fullContent
+      .replace(/\s+/g, ' ')                    // Multiple spaces to single
+      .replace(/\n\s*\n\s*\n/g, '\n\n')       // Multiple newlines to double
+      .replace(/[^\S\n]+/g, ' ')              // Clean whitespace but preserve newlines
+      .replace(/\t+/g, ' ')                   // Tabs to spaces
+      .replace(/[\r\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '') // Control chars
       .trim();
     
-    const actualWordCount = cleanContent.split(/\s+/).length;
+    // Extract excerpt (first meaningful paragraph or first 300 chars)
+    const sentences = fullContent.split(/[.!?]+/);
+    const meaningfulSentences = sentences.filter(s => s.trim().length > 20);
     
-    // Extract key information
-    const firstParagraph = cleanContent.split('\n')[0] || cleanContent.substring(0, 300);
+    if (meaningfulSentences.length > 0) {
+      excerpt = meaningfulSentences.slice(0, 2).join('. ').trim() + '.';
+      if (excerpt.length > 300) {
+        excerpt = excerpt.substring(0, 300) + '...';
+      }
+    } else {
+      excerpt = fullContent.substring(0, 300) + (fullContent.length > 300 ? '...' : '');
+    }
+    
+    // Calculate actual word count
+    const actualWordCount = fullContent.split(/\s+/).filter(word => word.length > 0).length;
+    
+    // Quality checks
+    const isQualityContent = fullContent.length > 500 && 
+                           actualWordCount > 100 && 
+                           !fullContent.includes('JavaScript is disabled') &&
+                           !fullContent.includes('Please enable cookies');
     
     return {
       article_id,
       url,
-      full_content: cleanContent,
-      excerpt: firstParagraph,
+      title: title,
+      full_content: fullContent,
+      excerpt: excerpt,
       actual_word_count: actualWordCount,
       extraction_method: extractionMethod,
-      extraction_success: cleanContent.length > 100,
+      extraction_success: isQualityContent,
+      content_quality_score: calculateQualityScore(fullContent, title),
       extracted_at: new Date().toISOString()
     };
     
@@ -416,9 +462,52 @@ fastify.post('/api/extract-full-content', async (request, reply) => {
     return {
       article_id,
       url,
+      title: '',
+      full_content: '',
+      excerpt: '',
       error: error.message,
       extraction_success: false,
       extracted_at: new Date().toISOString()
     };
   }
 });
+
+// Helper function to calculate content quality score
+function calculateQualityScore(content, title) {
+  let score = 0;
+  
+  // Length scoring
+  if (content.length > 1000) score += 30;
+  else if (content.length > 500) score += 20;
+  else if (content.length > 200) score += 10;
+  
+  // Word count scoring
+  const wordCount = content.split(/\s+/).length;
+  if (wordCount > 300) score += 25;
+  else if (wordCount > 150) score += 15;
+  else if (wordCount > 75) score += 10;
+  
+  // Structure scoring
+  const sentences = content.split(/[.!?]+/).length;
+  if (sentences > 10) score += 15;
+  else if (sentences > 5) score += 10;
+  
+  // Title presence
+  if (title && title.length > 10) score += 10;
+  
+  // Quality indicators
+  const qualityIndicators = ['travel', 'destination', 'hotel', 'trip', 'vacation', 'visit', 'experience'];
+  const qualityMatches = qualityIndicators.filter(indicator => 
+    content.toLowerCase().includes(indicator)
+  ).length;
+  score += qualityMatches * 5;
+  
+  // Negative indicators
+  const negativeIndicators = ['cookie', 'javascript', 'enable', 'subscribe', 'newsletter', 'sign up'];
+  const negativeMatches = negativeIndicators.filter(indicator => 
+    content.toLowerCase().includes(indicator)
+  ).length;
+  score -= negativeMatches * 10;
+  
+  return Math.max(0, Math.min(100, score));
+}
