@@ -288,3 +288,137 @@ const start = async () => {
 };
 
 start();
+
+// Add this new endpoint after your existing ones
+fastify.post('/api/extract-full-content', async (request, reply) => {
+  const { url, article_id } = request.body;
+  
+  try {
+    let fullContent = '';
+    let extractionMethod = 'http';
+    
+    // Try Browserbase for better content extraction
+    if (process.env.BROWSERBASE_API_KEY) {
+      try {
+        const sessionResponse = await axios.post('https://api.browserbase.com/v1/sessions', {
+          projectId: process.env.BROWSERBASE_PROJECT_ID
+        }, {
+          headers: {
+            'x-bb-api-key': process.env.BROWSERBASE_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          timeout: 15000
+        });
+
+        const sessionId = sessionResponse.data.id;
+        
+        await axios.post(`https://api.browserbase.com/v1/sessions/${sessionId}/goto`, {
+          url: url
+        }, {
+          headers: {
+            'x-bb-api-key': process.env.BROWSERBASE_API_KEY
+          }
+        });
+
+        // Wait for content to load
+        await new Promise(resolve => setTimeout(resolve, 3000));
+
+        const contentResponse = await axios.get(`https://api.browserbase.com/v1/sessions/${sessionId}/content`, {
+          headers: {
+            'x-bb-api-key': process.env.BROWSERBASE_API_KEY
+          }
+        });
+
+        const html = contentResponse.data;
+        await axios.delete(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+          headers: {
+            'x-bb-api-key': process.env.BROWSERBASE_API_KEY
+          }
+        });
+
+        // Extract article content from HTML
+        const $ = cheerio.load(html);
+        
+        // Remove unwanted elements
+        $('script, style, nav, header, footer, .ad, .advertisement, .social-share, .comments').remove();
+        
+        // Try multiple selectors for article content
+        const contentSelectors = [
+          'article',
+          '.article-content',
+          '.story-body',
+          '.entry-content',
+          '[class*="content"]',
+          '.post-content',
+          'main'
+        ];
+        
+        for (const selector of contentSelectors) {
+          const content = $(selector).text().trim();
+          if (content.length > fullContent.length && content.length > 500) {
+            fullContent = content;
+          }
+        }
+        
+        extractionMethod = 'browserbase';
+        
+      } catch (browserbaseError) {
+        console.log(`Browserbase failed for ${url}, trying HTTP fallback`);
+      }
+    }
+    
+    // HTTP fallback if Browserbase failed or not available
+    if (!fullContent || fullContent.length < 200) {
+      const response = await axios.get(url, {
+        timeout: 10000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
+      
+      const $ = cheerio.load(response.data);
+      $('script, style, nav, header, footer, .ad, .advertisement').remove();
+      
+      const contentSelectors = ['article', '.article-content', '.story-body', 'main'];
+      for (const selector of contentSelectors) {
+        const content = $(selector).text().trim();
+        if (content.length > fullContent.length) {
+          fullContent = content;
+        }
+      }
+      
+      extractionMethod = 'http';
+    }
+    
+    // Clean and process the content
+    const cleanContent = fullContent
+      .replace(/\s+/g, ' ')
+      .replace(/\n+/g, '\n')
+      .trim();
+    
+    const actualWordCount = cleanContent.split(/\s+/).length;
+    
+    // Extract key information
+    const firstParagraph = cleanContent.split('\n')[0] || cleanContent.substring(0, 300);
+    
+    return {
+      article_id,
+      url,
+      full_content: cleanContent,
+      excerpt: firstParagraph,
+      actual_word_count: actualWordCount,
+      extraction_method: extractionMethod,
+      extraction_success: cleanContent.length > 100,
+      extracted_at: new Date().toISOString()
+    };
+    
+  } catch (error) {
+    return {
+      article_id,
+      url,
+      error: error.message,
+      extraction_success: false,
+      extracted_at: new Date().toISOString()
+    };
+  }
+});
