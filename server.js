@@ -135,7 +135,7 @@ fastify.post('/api/scrape-user-sources', async (request, reply) => {
         const articles = await scrapeSource({
           name: source.website_name,
           url: source.website_url,
-          selectors: JSON.parse(source.selectors)
+          selectors: typeof source.selectors === 'string' ? JSON.parse(source.selectors) : source.selectors
         });
         
         results.push({
