@@ -179,4 +179,21 @@ fastify.post('/execute/scrape_websites', async (request, reply) => {
 
   return {
     results,
-    to
+    total_sites: websites.length,
+    successful_sites: results.filter(r => r.success).length,
+    total_articles: results.reduce((sum, r) => sum + (r.articles_found || 0), 0)
+  };
+});
+
+const start = async () => {
+  try {
+    const port = process.env.PORT || 3000;
+    await fastify.listen({ port, host: '0.0.0.0' });
+    console.log(`Enhanced MCP Server running on port ${port}`);
+  } catch (err) {
+    fastify.log.error(err);
+    process.exit(1);
+  }
+};
+
+start();
